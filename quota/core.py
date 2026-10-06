@@ -1,5 +1,7 @@
 """滑动窗口配额判定。"""
 
+from collections import deque
+
 WINDOW_MS = 1000
 TOTAL_CAP = 10
 UNIT_CAP = 3
@@ -14,26 +16,48 @@ class Counter:
 
 
 def decide(events, counter):
-    kept = []
+    seen = set()
+    windows = {}
+    totals = {}
+    unit_counts = {}
     out = []
     for ev in events:
-        total = 0
-        unit = 0
-        for past in kept:
+        event_id = ev["event_id"]
+        if event_id in seen:
+            out.append({"event_id": event_id, "decision": "drop",
+                        "reason": "duplicate", "scanned": counter.scanned})
+            continue
+        seen.add(event_id)
+
+        commander = ev["commander"]
+        unit = ev["unit"]
+        history = windows.get(commander)
+        if history is None:
+            history = deque()
+            windows[commander] = history
+
+        cutoff = ev["ts"] - WINDOW_MS
+        while history and history[0][0] <= cutoff:
             counter.scanned += 1
-            if past["commander"] == ev["commander"]:
-                total += 1
-                if past["unit"] == ev["unit"]:
-                    unit += 1
-        if total >= TOTAL_CAP:
-            out.append({"event_id": ev["event_id"], "decision": "drop",
+            _, old_unit = history.popleft()
+            totals[commander] -= 1
+            if old_unit not in CRITICAL:
+                unit_counts[(commander, old_unit)] -= 1
+
+        if totals.get(commander, 0) >= TOTAL_CAP:
+            out.append({"event_id": event_id, "decision": "drop",
                         "reason": "quota", "scanned": counter.scanned})
             continue
-        if unit >= UNIT_CAP:
-            out.append({"event_id": ev["event_id"], "decision": "drop",
+        if unit not in CRITICAL and unit_counts.get((commander, unit), 0) >= UNIT_CAP:
+            out.append({"event_id": event_id, "decision": "drop",
                         "reason": "quota", "scanned": counter.scanned})
             continue
-        kept.append(ev)
-        out.append({"event_id": ev["event_id"], "decision": "keep",
+
+        history.append((ev["ts"], unit))
+        totals[commander] = totals.get(commander, 0) + 1
+        if unit not in CRITICAL:
+            key = (commander, unit)
+            unit_counts[key] = unit_counts.get(key, 0) + 1
+        out.append({"event_id": event_id, "decision": "keep",
                     "reason": None, "scanned": counter.scanned})
     return out
